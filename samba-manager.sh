@@ -29,26 +29,7 @@ show_header() {
     echo -e "${CYAN}==========================================${NC}"
     echo ""
     if [ ! -z "$DOMAIN_NAME" ]; then
-        echo -e "${GREEN}Welcome to Samba AD Manager!${NC}"
-    echo -e "${YELLOW}Initializing...${NC}"
-    echo ""
-    
-    # Initialize domain information
-    if init_domain; then
-        echo ""
-        echo -e "${GREEN}✓ Ready to manage Active Directory${NC}"
-        sleep 2
-        show_main_menu
-    else
-        echo ""
-        echo -e "${RED}✗ Failed to initialize domain${NC}"
-        echo -e "${YELLOW}Please check if this is a Samba AD server${NC}"
-        exit 1
-    fi
-}
-
-# Run main function
-main "$@"Connected to domain: $DOMAIN_NAME${NC}"
+        echo -e "${GREEN}Connected to domain: $DOMAIN_NAME${NC}"
         echo -e "${GREEN}Domain DN: $DOMAIN_DN${NC}"
         echo ""
     fi
@@ -84,7 +65,7 @@ init_domain() {
     fi
 }
 
-# Function to browse OUs
+# Function to browse OUs - simplified version
 browse_ous() {
     local title="$1"
     local current_ou="$2"
@@ -100,7 +81,6 @@ browse_ous() {
         echo -e "${YELLOW}Current Location: $current_ou${NC}"
         echo ""
         
-        # Get child OUs and containers
         echo -e "${CYAN}NAVIGATION:${NC}"
         echo -e "${CYAN}==========${NC}"
         
@@ -111,44 +91,34 @@ browse_ous() {
         echo -e "${RED}X. Cancel${NC}"
         echo ""
         
-        # List child OUs
-        local ous_found=false
+        # List child OUs using simple method
+        echo -e "${CYAN}AVAILABLE OUs:${NC}"
+        echo -e "${CYAN}==============${NC}"
+        
         local counter=1
+        local found_ous=false
         
-        echo -e "${CYAN}CHILD ORGANIZATIONAL UNITS:${NC}"
-        echo -e "${CYAN}=============================${NC}"
-        
-        # Create temporary file to store OU list
-        local ou_list="/tmp/samba_ou_list_$$"
-        samba-tool ou list 2>/dev/null | grep "$current_ou" | grep -v "^$current_ou$" > "$ou_list"
-        
-        # Also get containers
-        ldbsearch -H /var/lib/samba/private/sam.ldb "(&(objectClass=container)(!(objectClass=organizationalUnit)))" dn 2>/dev/null | grep "dn:" | awk '{print $2}' | grep "$current_ou" >> "$ou_list"
-        
-        if [ -s "$ou_list" ]; then
-            while IFS= read -r ou_dn; do
-                if [[ "$ou_dn" =~ ^(OU=|CN=)([^,]+),(.*)$ ]]; then
-                    local ou_type="${BASH_REMATCH[1]%=}"
+        # Get OUs using samba-tool
+        while IFS= read -r ou_line; do
+            if [ ! -z "$ou_line" ] && [[ "$ou_line" == *"$current_ou"* ]]; then
+                # Extract OU name from DN
+                if [[ "$ou_line" =~ ^(OU=|CN=)([^,]+), ]]; then
                     local ou_name="${BASH_REMATCH[2]}"
-                    local parent_dn="${BASH_REMATCH[3]}"
+                    local ou_type="${BASH_REMATCH[1]%=}"
+                    local icon="[$ou_type]"
                     
-                    if [ "$parent_dn" = "$current_ou" ]; then
-                        local icon="[OU]"
-                        if [ "$ou_type" = "CN" ]; then
-                            icon="[CN]"
-                        fi
-                        echo -e "${YELLOW}$counter. $icon $ou_name${NC}"
-                        eval "ou_option_$counter=\"$ou_dn\""
-                        ((counter++))
-                        ous_found=true
-                    fi
+                    echo -e "${YELLOW}$counter. $icon $ou_name${NC}"
+                    echo -e "    ${GRAY}$ou_line${NC}"
+                    
+                    # Store the full DN for selection
+                    eval "ou_choice_$counter=\"$ou_line\""
+                    counter=$((counter + 1))
+                    found_ous=true
                 fi
-            done < "$ou_list"
-        fi
+            fi
+        done < <(samba-tool ou list 2>/dev/null; echo "CN=Users,$DOMAIN_DN"; echo "CN=Computers,$DOMAIN_DN")
         
-        rm -f "$ou_list"
-        
-        if [ "$ous_found" = false ]; then
+        if [ "$found_ous" = false ]; then
             echo -e "${GRAY}No child OUs found.${NC}"
         fi
         
@@ -158,7 +128,7 @@ browse_ous() {
         case "${choice^^}" in
             "0")
                 if [ "$current_ou" != "$DOMAIN_DN" ]; then
-                    # Extract parent DN
+                    # Extract parent DN (remove first component)
                     current_ou=$(echo "$current_ou" | sed 's/^[^,]*,//')
                 fi
                 ;;
@@ -171,7 +141,7 @@ browse_ous() {
                 ;;
             *)
                 if [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -gt 0 ]; then
-                    local selected_var="ou_option_$choice"
+                    local selected_var="ou_choice_$choice"
                     local selected_ou="${!selected_var}"
                     if [ ! -z "$selected_ou" ]; then
                         current_ou="$selected_ou"
@@ -188,7 +158,7 @@ browse_ous() {
     done
 }
 
-# Function to select user
+# Function to select user - simplified
 select_user() {
     local title="$1"
     
@@ -198,7 +168,7 @@ select_user() {
         echo ""
         
         echo -e "${WHITE}1. Search by name/login${NC}"
-        echo -e "${WHITE}2. Browse by OU${NC}"
+        echo -e "${WHITE}2. List all users${NC}"
         echo -e "${RED}0. Cancel${NC}"
         echo ""
         
@@ -209,16 +179,14 @@ select_user() {
                 echo ""
                 read -p "Enter search term: " search_term
                 if [ ! -z "$search_term" ]; then
-                    search_and_select_users "$search_term" "$title"
-                    return $?
+                    if search_and_select_users "$search_term"; then
+                        return 0
+                    fi
                 fi
                 ;;
             "2")
-                local selected_ou
-                selected_ou=$(browse_ous "Select OU to browse users")
-                if [ $? -eq 0 ] && [ ! -z "$selected_ou" ]; then
-                    list_and_select_users_from_ou "$selected_ou" "$title"
-                    return $?
+                if list_and_select_users; then
+                    return 0
                 fi
                 ;;
             "0")
@@ -235,137 +203,107 @@ select_user() {
 # Function to search and select users
 search_and_select_users() {
     local search_term="$1"
-    local title="$2"
     
     show_header
     echo -e "${YELLOW}Searching for users with term: $search_term${NC}"
     echo ""
     
-    # Create temporary file for search results
-    local user_list="/tmp/samba_users_$$"
-    samba-tool user list 2>/dev/null | grep -i "$search_term" > "$user_list"
-    
-    if [ ! -s "$user_list" ]; then
-        echo -e "${YELLOW}No users found!${NC}"
-        rm -f "$user_list"
-        pause
-        return 1
-    fi
+    local counter=1
+    local found_users=false
     
     echo -e "${CYAN}SEARCH RESULTS:${NC}"
     echo -e "${CYAN}===============${NC}"
     echo ""
     
-    local counter=1
+    # Search in user list
     while IFS= read -r username; do
-        echo -e "${YELLOW}$counter. $username${NC}"
-        
-        # Get user details
-        local user_info=$(samba-tool user show "$username" 2>/dev/null)
-        if [ ! -z "$user_info" ]; then
-            local email=$(echo "$user_info" | grep "mail:" | awk '{print $2}')
-            local dn=$(echo "$user_info" | grep "dn:" | awk '{print $2}')
+        if [[ "$username" == *"$search_term"* ]] || [[ "$username" =~ .*$(echo "$search_term" | tr '[:upper:]' '[:lower:]').* ]]; then
+            echo -e "${YELLOW}$counter. $username${NC}"
             
-            if [ ! -z "$email" ]; then
-                echo -e "    ${GRAY}Email: $email${NC}"
+            # Try to get additional info
+            local user_info=$(samba-tool user show "$username" 2>/dev/null)
+            if [ $? -eq 0 ]; then
+                local email=$(echo "$user_info" | grep -i "mail:" | awk '{print $2}')
+                if [ ! -z "$email" ]; then
+                    echo -e "    ${GRAY}Email: $email${NC}"
+                fi
             fi
-            echo -e "    ${GRAY}DN: $dn${NC}"
+            
+            eval "user_choice_$counter=\"$username\""
+            counter=$((counter + 1))
+            found_users=true
+            echo ""
         fi
-        
-        eval "user_option_$counter=\"$username\""
-        echo ""
-        ((counter++))
-    done < "$user_list"
+    done < <(samba-tool user list 2>/dev/null)
     
-    echo -e "${RED}0. Cancel${NC}"
-    echo ""
-    
-    read -p "Select user by number: " selection
-    
-    if [[ "$selection" =~ ^[0-9]+$ ]] && [ "$selection" -gt 0 ]; then
-        local selected_var="user_option_$selection"
-        local selected_user="${!selected_var}"
-        if [ ! -z "$selected_user" ]; then
-            SELECTED_OBJECT="$selected_user"
-            SELECTED_OBJECT_TYPE="User"
-            rm -f "$user_list"
-            return 0
-        fi
-    fi
-    
-    rm -f "$user_list"
-    return 1
-}
-
-# Function to list and select users from OU
-list_and_select_users_from_ou() {
-    local ou_dn="$1"
-    local title="$2"
-    
-    show_header
-    echo -e "${YELLOW}Users in OU: $ou_dn${NC}"
-    echo ""
-    
-    # Get users from specific OU using ldbsearch
-    local user_list="/tmp/samba_ou_users_$$"
-    ldbsearch -H /var/lib/samba/private/sam.ldb -b "$ou_dn" -s one "(&(objectClass=user)(!(objectClass=computer)))" sAMAccountName mail 2>/dev/null | grep -E "(sAMAccountName|mail):" > "$user_list"
-    
-    if [ ! -s "$user_list" ]; then
-        echo -e "${YELLOW}No users found in this OU!${NC}"
-        rm -f "$user_list"
+    if [ "$found_users" = false ]; then
+        echo -e "${YELLOW}No users found!${NC}"
         pause
         return 1
     fi
     
-    echo -e "${CYAN}USERS FOUND:${NC}"
-    echo -e "${CYAN}============${NC}"
-    echo ""
-    
-    local counter=1
-    local current_user=""
-    local current_email=""
-    
-    while IFS= read -r line; do
-        if [[ "$line" =~ sAMAccountName:\ (.+) ]]; then
-            current_user="${BASH_REMATCH[1]}"
-        elif [[ "$line" =~ mail:\ (.+) ]]; then
-            current_email="${BASH_REMATCH[1]}"
-        fi
-        
-        # If we have a username and potentially an email, display it
-        if [ ! -z "$current_user" ]; then
-            echo -e "${YELLOW}$counter. $current_user${NC}"
-            if [ ! -z "$current_email" ]; then
-                echo -e "    ${GRAY}Email: $current_email${NC}"
-            fi
-            
-            eval "user_option_$counter=\"$current_user\""
-            echo ""
-            ((counter++))
-            
-            # Reset for next user
-            current_user=""
-            current_email=""
-        fi
-    done < "$user_list"
-    
     echo -e "${RED}0. Cancel${NC}"
     echo ""
     
     read -p "Select user by number: " selection
     
     if [[ "$selection" =~ ^[0-9]+$ ]] && [ "$selection" -gt 0 ]; then
-        local selected_var="user_option_$selection"
+        local selected_var="user_choice_$selection"
         local selected_user="${!selected_var}"
         if [ ! -z "$selected_user" ]; then
             SELECTED_OBJECT="$selected_user"
             SELECTED_OBJECT_TYPE="User"
-            rm -f "$user_list"
             return 0
         fi
     fi
     
-    rm -f "$user_list"
+    return 1
+}
+
+# Function to list and select all users
+list_and_select_users() {
+    show_header
+    echo -e "${YELLOW}Loading all users...${NC}"
+    echo ""
+    
+    local counter=1
+    local found_users=false
+    
+    echo -e "${CYAN}ALL USERS:${NC}"
+    echo -e "${CYAN}==========${NC}"
+    echo ""
+    
+    while IFS= read -r username; do
+        if [ ! -z "$username" ]; then
+            echo -e "${YELLOW}$counter. $username${NC}"
+            eval "user_choice_$counter=\"$username\""
+            counter=$((counter + 1))
+            found_users=true
+        fi
+    done < <(samba-tool user list 2>/dev/null)
+    
+    if [ "$found_users" = false ]; then
+        echo -e "${YELLOW}No users found!${NC}"
+        pause
+        return 1
+    fi
+    
+    echo ""
+    echo -e "${RED}0. Cancel${NC}"
+    echo ""
+    
+    read -p "Select user by number: " selection
+    
+    if [[ "$selection" =~ ^[0-9]+$ ]] && [ "$selection" -gt 0 ]; then
+        local selected_var="user_choice_$selection"
+        local selected_user="${!selected_var}"
+        if [ ! -z "$selected_user" ]; then
+            SELECTED_OBJECT="$selected_user"
+            SELECTED_OBJECT_TYPE="User"
+            return 0
+        fi
+    fi
+    
     return 1
 }
 
@@ -383,7 +321,8 @@ create_user() {
         return
     fi
     
-    read -s -p "Password: " password
+    echo -n "Password: "
+    read -s password
     echo ""
     if [ -z "$password" ]; then
         echo -e "${RED}Password is required!${NC}"
@@ -393,6 +332,8 @@ create_user() {
     
     echo ""
     echo -e "${YELLOW}Select target OU for the new user...${NC}"
+    pause
+    
     local target_ou
     target_ou=$(browse_ous "Select Target OU for New User")
     
@@ -411,33 +352,33 @@ create_user() {
     echo -e "${YELLOW}Creating user...${NC}"
     
     # Build samba-tool command
-    local cmd="samba-tool user create \"$username\" \"$password\""
+    local cmd="samba-tool user create '$username' '$password'"
     
     if [ ! -z "$firstname" ]; then
-        cmd="$cmd --given-name=\"$firstname\""
+        cmd="$cmd --given-name='$firstname'"
     fi
     
     if [ ! -z "$lastname" ]; then
-        cmd="$cmd --surname=\"$lastname\""
+        cmd="$cmd --surname='$lastname'"
     fi
     
     if [ ! -z "$email" ]; then
-        cmd="$cmd --mail-address=\"$email\""
+        cmd="$cmd --mail-address='$email'"
     fi
     
     if [ ! -z "$description" ]; then
-        cmd="$cmd --description=\"$description\""
+        cmd="$cmd --description='$description'"
     fi
     
     # Execute user creation
-    if eval "$cmd" 2>/dev/null; then
+    if eval "$cmd" >/dev/null 2>&1; then
         echo -e "${GREEN}✓ User $username created successfully!${NC}"
         
         # Move user to selected OU if not default
         if [ "$target_ou" != "$DOMAIN_DN" ] && [ "$target_ou" != "CN=Users,$DOMAIN_DN" ]; then
             echo -e "${YELLOW}Moving user to selected OU...${NC}"
             local user_dn="CN=$username,CN=Users,$DOMAIN_DN"
-            if samba-tool user move "$user_dn" "$target_ou" 2>/dev/null; then
+            if samba-tool user move "$user_dn" "$target_ou" >/dev/null 2>&1; then
                 echo -e "${GREEN}✓ User moved to $target_ou${NC}"
             else
                 echo -e "${YELLOW}! User created but could not be moved to target OU${NC}"
@@ -460,11 +401,12 @@ change_user_password() {
     if select_user "Select user to change password"; then
         echo ""
         echo -e "${YELLOW}Selected user: $SELECTED_OBJECT${NC}"
-        read -s -p "Enter new password: " new_password
+        echo -n "Enter new password: "
+        read -s new_password
         echo ""
         
         if [ ! -z "$new_password" ]; then
-            if samba-tool user setpassword "$SELECTED_OBJECT" --newpassword="$new_password" 2>/dev/null; then
+            if samba-tool user setpassword "$SELECTED_OBJECT" --newpassword="$new_password" >/dev/null 2>&1; then
                 echo -e "${GREEN}✓ Password changed successfully!${NC}"
             else
                 echo -e "${RED}✗ Failed to change password!${NC}"
@@ -494,13 +436,13 @@ toggle_user_account() {
         echo -e "${YELLOW}Selected user: $SELECTED_OBJECT${NC}"
         
         if [ "$operation" = "enable" ]; then
-            if samba-tool user enable "$SELECTED_OBJECT" 2>/dev/null; then
+            if samba-tool user enable "$SELECTED_OBJECT" >/dev/null 2>&1; then
                 echo -e "${GREEN}✓ User account enabled successfully!${NC}"
             else
                 echo -e "${RED}✗ Failed to enable user account!${NC}"
             fi
         else
-            if samba-tool user disable "$SELECTED_OBJECT" 2>/dev/null; then
+            if samba-tool user disable "$SELECTED_OBJECT" >/dev/null 2>&1; then
                 echo -e "${GREEN}✓ User account disabled successfully!${NC}"
             else
                 echo -e "${RED}✗ Failed to disable user account!${NC}"
@@ -526,7 +468,7 @@ add_user_to_group() {
         read -p "Group name: " group_name
         
         if [ ! -z "$group_name" ]; then
-            if samba-tool group addmembers "$group_name" "$SELECTED_OBJECT" 2>/dev/null; then
+            if samba-tool group addmembers "$group_name" "$SELECTED_OBJECT" >/dev/null 2>&1; then
                 echo -e "${GREEN}✓ User added to group successfully!${NC}"
             else
                 echo -e "${RED}✗ Failed to add user to group!${NC}"
@@ -558,7 +500,7 @@ remove_user() {
         read -p "Are you sure you want to delete user $SELECTED_OBJECT? (yes/no): " confirm
         
         if [ "${confirm,,}" = "yes" ]; then
-            if samba-tool user delete "$SELECTED_OBJECT" 2>/dev/null; then
+            if samba-tool user delete "$SELECTED_OBJECT" >/dev/null 2>&1; then
                 echo -e "${GREEN}✓ User removed successfully!${NC}"
                 SELECTED_OBJECT=""
                 SELECTED_OBJECT_TYPE=""
@@ -591,15 +533,16 @@ move_user() {
         local current_dn=$(echo "$user_info" | grep "dn:" | awk '{print $2}')
         
         if [ ! -z "$current_dn" ]; then
-            echo -e "${GRAY}Current OU: $current_dn${NC}"
+            echo -e "${GRAY}Current DN: $current_dn${NC}"
             echo ""
             echo -e "${YELLOW}Select target OU...${NC}"
+            pause
             
             local target_ou
             target_ou=$(browse_ous "Select Target OU")
             
             if [ $? -eq 0 ] && [ ! -z "$target_ou" ]; then
-                if samba-tool user move "$current_dn" "$target_ou" 2>/dev/null; then
+                if samba-tool user move "$current_dn" "$target_ou" >/dev/null 2>&1; then
                     echo -e "${GREEN}✓ User moved successfully!${NC}"
                 else
                     echo -e "${RED}✗ Failed to move user!${NC}"
@@ -626,7 +569,6 @@ list_users() {
     
     echo -e "${YELLOW}Loading users...${NC}"
     
-    # Get all users
     local user_count=0
     while IFS= read -r username; do
         if [ ! -z "$username" ]; then
@@ -634,8 +576,8 @@ list_users() {
             
             # Get user details
             local user_info=$(samba-tool user show "$username" 2>/dev/null)
-            if [ ! -z "$user_info" ]; then
-                local email=$(echo "$user_info" | grep "mail:" | awk '{print $2}')
+            if [ $? -eq 0 ]; then
+                local email=$(echo "$user_info" | grep -i "mail:" | awk '{print $2}')
                 local dn=$(echo "$user_info" | grep "dn:" | awk '{print $2}')
                 
                 if [ ! -z "$email" ]; then
@@ -645,7 +587,7 @@ list_users() {
             fi
             
             echo ""
-            ((user_count++))
+            user_count=$((user_count + 1))
         fi
     done < <(samba-tool user list 2>/dev/null)
     
@@ -662,40 +604,22 @@ list_computers() {
     
     echo -e "${YELLOW}Loading computers...${NC}"
     
-    # Get all computers using ldbsearch
     local computer_count=0
-    local computer_list="/tmp/samba_computers_$$"
     
-    ldbsearch -H /var/lib/samba/private/sam.ldb "(&(objectClass=computer))" sAMAccountName operatingSystem 2>/dev/null | grep -E "(sAMAccountName|operatingSystem):" > "$computer_list"
-    
-    local current_computer=""
-    local current_os=""
-    
-    while IFS= read -r line; do
-        if [[ "$line" =~ sAMAccountName:\ (.+) ]]; then
-            current_computer="${BASH_REMATCH[1]}"
-            current_computer="${current_computer%$}"  # Remove trailing $
-        elif [[ "$line" =~ operatingSystem:\ (.+) ]]; then
-            current_os="${BASH_REMATCH[1]}"
-        fi
-        
-        # If we have a computer name, display it
-        if [ ! -z "$current_computer" ]; then
-            echo -e "${YELLOW}Computer: $current_computer${NC}"
-            if [ ! -z "$current_os" ]; then
-                echo -e "  ${GRAY}OS: $current_os${NC}"
+    # Try to get computers using ldbsearch
+    if command -v ldbsearch >/dev/null 2>&1; then
+        while IFS= read -r computer_line; do
+            if [[ "$computer_line" =~ sAMAccountName:\ (.+) ]]; then
+                local computer_name="${BASH_REMATCH[1]}"
+                computer_name="${computer_name%$}"  # Remove trailing $
+                echo -e "${YELLOW}Computer: $computer_name${NC}"
+                computer_count=$((computer_count + 1))
+                echo ""
             fi
-            echo ""
-            
-            ((computer_count++))
-            
-            # Reset for next computer
-            current_computer=""
-            current_os=""
-        fi
-    done < "$computer_list"
-    
-    rm -f "$computer_list"
+        done < <(ldbsearch -H /var/lib/samba/private/sam.ldb "(&(objectClass=computer))" sAMAccountName 2>/dev/null)
+    else
+        echo -e "${YELLOW}ldbsearch not available. Computer listing limited.${NC}"
+    fi
     
     echo -e "${GREEN}Total computers found: $computer_count${NC}"
     pause
@@ -709,24 +633,38 @@ show_ou_structure() {
     echo ""
     
     echo -e "${YELLOW}Domain OUs:${NC}"
+    echo ""
     
     # List all OUs
-    samba-tool ou list 2>/dev/null | while IFS= read -r ou_dn; do
-        # Calculate indentation level
-        local level=$(echo "$ou_dn" | grep -o ",OU=" | wc -l)
-        local indent=""
-        for ((i=0; i<level; i++)); do
-            indent="  $indent"
-        done
-        
-        # Extract OU name
-        if [[ "$ou_dn" =~ ^OU=([^,]+) ]]; then
-            local ou_name="${BASH_REMATCH[1]}"
-            echo -e "${indent}${YELLOW}+ $ou_name${NC}"
-            echo -e "${indent}  ${GRAY}$ou_dn${NC}"
+    local ou_count=0
+    while IFS= read -r ou_dn; do
+        if [ ! -z "$ou_dn" ]; then
+            # Calculate indentation level based on comma count
+            local level=$(echo "$ou_dn" | grep -o "," | wc -l)
+            level=$((level - 2))  # Adjust for domain components
+            
+            if [ $level -lt 0 ]; then
+                level=0
+            fi
+            
+            local indent=""
+            for ((i=0; i<level; i++)); do
+                indent="  $indent"
+            done
+            
+            # Extract OU name
+            if [[ "$ou_dn" =~ ^(OU=|CN=)([^,]+) ]]; then
+                local ou_name="${BASH_REMATCH[2]}"
+                local ou_type="${BASH_REMATCH[1]%=}"
+                echo -e "${indent}${YELLOW}+ [$ou_type] $ou_name${NC}"
+                echo -e "${indent}  ${GRAY}$ou_dn${NC}"
+                ou_count=$((ou_count + 1))
+            fi
         fi
-    done
+    done < <(samba-tool ou list 2>/dev/null; echo "CN=Users,$DOMAIN_DN"; echo "CN=Computers,$DOMAIN_DN")
     
+    echo ""
+    echo -e "${GREEN}Total OUs found: $ou_count${NC}"
     pause
 }
 
@@ -838,4 +776,23 @@ main() {
     fi
     
     show_header
-    echo -e "${GREEN}
+    echo -e "${GREEN}Welcome to Samba AD Manager!${NC}"
+    echo -e "${YELLOW}Initializing...${NC}"
+    echo ""
+    
+    # Initialize domain information
+    if init_domain; then
+        echo ""
+        echo -e "${GREEN}✓ Ready to manage Active Directory${NC}"
+        sleep 2
+        show_main_menu
+    else
+        echo ""
+        echo -e "${RED}✗ Failed to initialize domain${NC}"
+        echo -e "${YELLOW}Please check if this is a Samba AD server${NC}"
+        exit 1
+    fi
+}
+
+# Run main function
+main "$@"
